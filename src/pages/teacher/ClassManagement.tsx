@@ -133,15 +133,50 @@ export const ClassManagement: React.FC = () => {
               for (let i = 0; i < studentIds.length; i += 10) {
                 const batch = studentIds.slice(i, i + 10);
                 const studentsQuery = query(
-                  collection(db, 'users'),
+                  collection(db, 'students'),
                   where('__name__', 'in', batch)
                 );
                 const studentsDocs = await getDocs(studentsQuery);
-                const batchStudents = studentsDocs.docs.map(doc => ({ ...doc.data(), id: doc.id } as User));
+                const batchStudents = studentsDocs.docs.map(doc => ({ ...doc.data(), id: doc.id } as any));
                 studentBatches.push(...batchStudents);
               }
-              students = studentBatches;
-              console.log('Fetched students:', students.map(s => ({ id: s.id, displayName: s.displayName })));
+              
+              // Fetch parent data for each student
+              const parentIds = [...new Set(studentBatches.map(s => s.parentId).filter(Boolean))];
+              const parentsMap = new Map();
+              
+              if (parentIds.length > 0) {
+                // Fetch parents in batches
+                for (let i = 0; i < parentIds.length; i += 10) {
+                  const batch = parentIds.slice(i, i + 10);
+                  const parentsQuery = query(
+                    collection(db, 'users'),
+                    where('__name__', 'in', batch)
+                  );
+                  const parentsDocs = await getDocs(parentsQuery);
+                  parentsDocs.docs.forEach(doc => {
+                    parentsMap.set(doc.id, doc.data());
+                  });
+                }
+              }
+              
+              // Map students with parent data
+              students = studentBatches.map(student => {
+                const parentData = parentsMap.get(student.parentId);
+                return {
+                  ...student,
+                  role: 'student',
+                  gender: student.gender === 'M' ? 'male' : student.gender === 'F' ? 'female' : undefined,
+                  parentName: parentData ? `${parentData.firstName || ''} ${parentData.lastName || ''}`.trim() || parentData.displayName : 'N/A',
+                  parentContact: parentData?.phoneNumber || parentData?.contact,
+                  parentEmail: parentData?.email,
+                  parentAddress: parentData?.address,
+                  parentCity: parentData?.city,
+                  parentPostalCode: parentData?.postalCode,
+                } as any;
+              });
+              
+              console.log('Fetched students with parent data:', students.map(s => ({ id: s.id, displayName: s.displayName, parentName: (s as any).parentName })));
             } else {
               console.log('No students found in class document');
             }

@@ -55,9 +55,30 @@ service cloud.firestore {
     // User profiles
     match /users/{userId} {
       allow read: if isAuthenticated();
-      allow list: if isAuthenticated() && (isAdmin() || isTeacher());
+      // Allow querying for Codice Fiscale validation during registration
+      allow list: if isAuthenticated() && (isAdmin() || isTeacher()) ||
+        // Allow unauthenticated queries for registration validation
+        !isAuthenticated();
       allow create: if isOwner(userId) || isAdmin();
       allow update: if isAdmin() || isOwner(userId);
+      allow delete: if isAdmin();
+    }
+    
+    // Students collection - separate from users
+    match /students/{studentId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        isTeacher() ||
+        // Parents can read their own children's data
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'parent' &&
+         resource.data.parentId == request.auth.uid)
+      );
+      // Allow list queries for registration validation (unauthenticated) and authenticated users
+      allow list: if !isAuthenticated() || isAuthenticated() && (isAdmin() || isTeacher());
+      // Allow creation during registration (unauthenticated) or by admin
+      allow create: if !isAuthenticated() || isAdmin();
+      allow update: if isAdmin();
       allow delete: if isAdmin();
     }
 

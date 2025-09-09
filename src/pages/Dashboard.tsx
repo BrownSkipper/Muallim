@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { collection, getDocs, query, where, orderBy, limit } from 'firebase/firestore';
+import { collection, getDocs, query, where, orderBy, limit, addDoc } from 'firebase/firestore';
 import { Euro, UserCheck, Users, School, CreditCard, User as UserIcon, CalendarDays, ClipboardList, BookOpenText, Calendar } from 'lucide-react';
 import { format } from 'date-fns';
 import { it } from 'date-fns/locale';
@@ -145,7 +145,7 @@ const CreateEventForm: React.FC<CreateEventFormProps> = ({ onClose }) => {
         createdAt: new Date()
       };
 
-      const docRef = await getDocs(query(collection(db, 'events'), limit(0)));
+      await addDoc(collection(db, 'events'), eventData);
       console.log('Event would be created:', eventData);
       
       alert('Evento creato con successo!');
@@ -264,40 +264,59 @@ const MapboxStudentMap: React.FC = () => {
   useEffect(() => {
     const fetchStudentLocations = async () => {
       try {
-        const studentsQuery = query(
-          collection(db, 'users'),
-          where('role', '==', 'student')
-        );
-        const studentsSnapshot = await getDocs(studentsQuery);
-        const students = studentsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as User[];
-
-        // Group students by city
-        const grouped: { [key: string]: User[] } = {};
-        const uniqueCities = new Set<string>();
+        // Fetch only city field to minimize data transfer
+        const studentsSnapshot = await getDocs(collection(db, 'students'));
+        const cityData: { [key: string]: number } = {};
+        const studentsByCity: { [key: string]: User[] } = {};
         
-        students.forEach(student => {
-          const studentCity = (student as any).city;
-          if (studentCity) {
-            const cityKey = studentCity.toLowerCase().trim();
-            uniqueCities.add(cityKey);
-            if (!grouped[cityKey]) {
-              grouped[cityKey] = [];
+        studentsSnapshot.docs.forEach(doc => {
+          const data = doc.data();
+          const city = data.city;
+          if (city) {
+            const cityKey = city.toLowerCase().trim();
+            cityData[cityKey] = (cityData[cityKey] || 0) + 1;
+            
+            if (!studentsByCity[cityKey]) {
+              studentsByCity[cityKey] = [];
             }
-            grouped[cityKey].push(student);
+            studentsByCity[cityKey].push({
+              id: doc.id,
+              city: data.city,
+              firstName: data.firstName || '',
+              lastName: data.lastName || '',
+              displayName: data.displayName || `${data.firstName || ''} ${data.lastName || ''}`.trim()
+            } as User);
           }
         });
 
-        // Fetch coordinates for all unique cities
+        // Set students data immediately to show partial results
+        setStudentsByCity(studentsByCity);
+        
+        const uniqueCities = Object.keys(cityData);
+
+        // Fetch coordinates with aggressive optimization
         const coordinates: { [key: string]: Coordinates } = {};
-        for (const city of Array.from(uniqueCities)) {
+
+        // Process all cities in parallel (no sequential batching)
+        const allPromises = uniqueCities.map(async (city) => {
           const coords = await getCityCoordinatesWithFallback(city, 'Italy');
           if (coords) {
-            coordinates[city] = coords;
+            return { city, coords };
           }
-        }
+          return null;
+        });
 
+        // Wait for all coordinates with a race condition for faster UI updates
+        const results = await Promise.allSettled(allPromises);
+        results.forEach((result) => {
+          if (result.status === 'fulfilled' && result.value) {
+            coordinates[result.value.city] = result.value.coords;
+          }
+        });
+
+        // Single update with all coordinates
         setCityCoordinates(coordinates);
-        setStudentsByCity(grouped);
+
       } catch (error) {
         console.error('Error fetching student locations:', error);
       } finally {
@@ -309,7 +328,12 @@ const MapboxStudentMap: React.FC = () => {
   }, []);
 
   if (isLoading) {
-    return <div className="text-center py-8">Caricamento mappa...</div>;
+    return (
+      <div className="text-center py-8">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-2"></div>
+        <p className="text-gray-600">Caricamento distribuzione studenti...</p>
+      </div>
+    );
   }
 
   // Use a public Mapbox token or fallback to simple visualization
@@ -415,7 +439,6 @@ export const Dashboard: React.FC = () => {
   const [userClass, setUserClass] = useState<Class | null>(null);
   
   // Admin statistics
-  const [enrolledStudents, setEnrolledStudents] = useState<User[]>([]);
   const [paymentStats, setPaymentStats] = useState({
     totalFamilies: 0,
     paidFamilies: 0,
@@ -453,15 +476,14 @@ export const Dashboard: React.FC = () => {
 
   const fetchAdminStats = async () => {
     try {
-      // Fetch enrolled students
+      // Fetch enrolled students from students collection
       const studentsQuery = query(
-        collection(db, 'users'),
-        where('role', '==', 'student'),
+        collection(db, 'students'),
         where('isEnrolled', '==', true)
       );
       const studentsDocs = await getDocs(studentsQuery);
       const students = studentsDocs.docs.map(doc => ({ ...doc.data(), id: doc.id } as User));
-      setEnrolledStudents(students);
+      // Students data fetched for statistics calculation
 
       // Calculate payment statistics
       const paymentRecordsQuery = query(collection(db, 'paymentRecords'), orderBy('date', 'desc'));

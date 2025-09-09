@@ -2,9 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useForm } from 'react-hook-form';
 import { 
-  Users, Edit, CheckCircle, X, AlertCircle, Phone, Calendar, 
-  MapPin, Search, Filter, Shield, Save, ChevronLeft, ChevronRight,
-  LucideMessageSquareWarning
+  Download, Edit, Filter, Search, Calendar, MapPin, Phone, CheckCircle, AlertCircle, X, Users, Shield, Save, ChevronLeft, ChevronRight, ArrowDown, ArrowUp, UserPlus, Mail,
+  UserMinus
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -16,11 +15,10 @@ import {
   doc, 
   updateDoc, 
   query, 
-  where, 
- 
+  where
 } from 'firebase/firestore';
 import { db } from '../../services/firebase';
-import { User as UserType, Class } from '../../types';
+import { User as UserType, Class, Student, StudentWithParent, UserRole } from '../../types';
 import { isValid, format } from 'date-fns';
 
 interface StudentFormValues {
@@ -28,19 +26,29 @@ interface StudentFormValues {
   email: string;
   phoneNumber?: string;
   address?: string;
+  city?: string;
+  postalCode?: string;
   birthDate?: string;
   gender?: string;
   emergencyContact?: string;
   parentName?: string;
   parentContact?: string;
+  parentEmail?: string;
   classId?: string;
+  italianSchoolClass?: string;
+  codiceFiscale?: string;
+  enrollmentType?: string;
+  hasDisability?: boolean;
+  selectedTurni?: string[];
+  attendanceMode?: string;
+  accountStatus?: string;
 }
 
 export const ManageStudents: React.FC = () => {
   const { userProfile } = useAuth();
   const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<StudentFormValues>();
-  const [students, setStudents] = useState<UserType[]>([]);
-  const [filteredStudents, setFilteredStudents] = useState<UserType[]>([]);
+  const [students, setStudents] = useState<StudentWithParent[]>([]);
+  const [filteredStudents, setFilteredStudents] = useState<StudentWithParent[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -58,13 +66,31 @@ export const ManageStudents: React.FC = () => {
   const [viewMode, setViewMode] = useState<'enrolled' | 'waiting'>('enrolled');
   const [filtersOpen, setFiltersOpen] = useState(false);
 
-  // Filters
+  // Advanced Filters
   const [filters, setFilters] = useState({
     name: '',
+    surname: '',
     class: '',
     age: '',
     parentName: '',
-    parentPhone: ''
+    parentPhone: '',
+    enrollmentType: '',
+    attendanceMode: '',
+    gender: '',
+    italianSchoolClass: ''
+  });
+
+  // Advanced Sorting - each field has its own sort state
+  const [sortStates, setSortStates] = useState<{
+    createdAt: 'desc' | 'asc' | null;
+    age: 'desc' | 'asc' | null;
+    name: 'desc' | 'asc' | null;
+    surname: 'desc' | 'asc' | null;
+  }>({
+    createdAt: 'desc', // Default active sort
+    age: null,
+    name: null,
+    surname: null
   });
 
   useEffect(() => {
@@ -78,10 +104,9 @@ export const ManageStudents: React.FC = () => {
         const fetchedClasses = classesDocs.docs.map(doc => ({ ...doc.data(), id: doc.id } as Class));
         setClasses(fetchedClasses);
 
-        // Fetch students with proper date conversion
+        // Fetch students from students collection
         const studentsQuery = query(
-          collection(db, 'users'),
-          where('role', '==', 'student')
+          collection(db, 'students')
         );
         const studentsDocs = await getDocs(studentsQuery);
         const toJsDate = (val: any): Date | null => {
@@ -103,10 +128,50 @@ export const ManageStudents: React.FC = () => {
             birthDate: toJsDate(data.birthDate),
             createdAt: toJsDate(data.createdAt) || new Date(),
             enrollmentDate: toJsDate(data.enrollmentDate),
-          } as UserType;
+          } as Student;
         });
-        setStudents(fetchedStudents);
-        setFilteredStudents(fetchedStudents);
+
+        // Fetch all parents first to optimize queries
+        const parentsQuery = query(collection(db, 'users'), where('role', '==', 'parent'));
+        const parentsDocs = await getDocs(parentsQuery);
+        const parentsMap = new Map();
+        
+        parentsDocs.docs.forEach(doc => {
+          const parentData = doc.data();
+          parentsMap.set(doc.id, parentData);
+        });
+
+        // Count siblings for each parent
+        const siblingCounts = new Map();
+        fetchedStudents.forEach(student => {
+          if (student.parentId) {
+            const currentCount = siblingCounts.get(student.parentId) || 0;
+            siblingCounts.set(student.parentId, currentCount + 1);
+          }
+        });
+
+        // Map students with parent data
+        const studentsWithParents: StudentWithParent[] = fetchedStudents.map(student => {
+          const parentData = parentsMap.get(student.parentId);
+          const siblingCount = siblingCounts.get(student.parentId) || 0;
+          
+          return {
+            ...student,
+            role: 'student' as UserRole,
+            gender: student.gender,
+            parentName: parentData ? `${parentData.firstName || ''} ${parentData.lastName || ''}`.trim() || parentData.displayName : 'N/A',
+            parentCodiceFiscale: parentData?.codiceFiscale,
+            parentContact: parentData?.phoneNumber || parentData.contact,
+            parentEmail: parentData?.email,
+            parentAddress: parentData?.address,
+            parentCity: parentData?.city,
+            parentPostalCode: parentData?.postalCode,
+            siblingCount: siblingCount,
+          };
+        });
+
+        setStudents(studentsWithParents);
+        setFilteredStudents(studentsWithParents);
       } catch (error) {
         console.error('Error fetching data:', error);
         setMessage({ type: 'error', text: 'Error fetching data' });
@@ -121,16 +186,24 @@ export const ManageStudents: React.FC = () => {
   useEffect(() => {
     let filtered = [...students];
     
-    // Apply filters
+    // Apply advanced filters
     if (filters.name) {
       const q = filters.name.toLowerCase();
       filtered = filtered.filter(student => 
-        (student.displayName || '').toLowerCase().includes(q)
+        (student.displayName || '').toLowerCase().includes(q) ||
+        (student.firstName || '').toLowerCase().includes(q)
+      );
+    }
+    
+    if (filters.surname) {
+      const q = filters.surname.toLowerCase();
+      filtered = filtered.filter(student => 
+        (student.lastName || '').toLowerCase().includes(q)
       );
     }
     
     if (filters.class) {
-      filtered = filtered.filter(student => student.classId === filters.class);
+      filtered = filtered.filter(student => student.currentClass === filters.class);
     }
     
     if (filters.age) {
@@ -152,11 +225,83 @@ export const ManageStudents: React.FC = () => {
       );
     }
 
+    if (filters.enrollmentType) {
+      filtered = filtered.filter(student => 
+        (student as any).enrollmentType === filters.enrollmentType
+      );
+    }
+
+    if (filters.attendanceMode) {
+      filtered = filtered.filter(student => 
+        (student as any).attendanceMode === filters.attendanceMode
+      );
+    }
+
+    if (filters.gender) {
+      filtered = filtered.filter(student => 
+        student.gender === filters.gender
+      );
+    }
+
+    if (filters.italianSchoolClass) {
+      const q = filters.italianSchoolClass.toLowerCase();
+      filtered = filtered.filter(student => 
+        ((student as any).italianSchoolClass || '').toLowerCase().includes(q)
+      );
+    }
+
+    // Apply advanced sorting - find the active sort field
+    const activeSortField = Object.entries(sortStates).find(([_, order]) => order !== null)?.[0] as keyof typeof sortStates;
+    const activeSortOrder = activeSortField ? sortStates[activeSortField] : 'desc';
+    
+    if (activeSortField && activeSortOrder) {
+      filtered.sort((a, b) => {
+        let valueA: any, valueB: any;
+        
+        switch (activeSortField) {
+          case 'createdAt':
+            valueA = a.createdAt || new Date(0);
+            valueB = b.createdAt || new Date(0);
+            break;
+          case 'age':
+            valueA = calculateAge(a.birthDate);
+            valueB = calculateAge(b.birthDate);
+            // Convert to numbers for proper sorting
+            valueA = valueA === 'N/A' ? 0 : parseInt(valueA);
+            valueB = valueB === 'N/A' ? 0 : parseInt(valueB);
+            break;
+          case 'name':
+            valueA = (a.firstName || a.displayName || '').toLowerCase();
+            valueB = (b.firstName || b.displayName || '').toLowerCase();
+            break;
+          case 'surname':
+            valueA = (a.lastName || '').toLowerCase();
+            valueB = (b.lastName || '').toLowerCase();
+            break;
+          default:
+            valueA = a.createdAt || new Date(0);
+            valueB = b.createdAt || new Date(0);
+        }
+        
+        if (activeSortField === 'createdAt') {
+          return activeSortOrder === 'desc' 
+            ? valueB.getTime() - valueA.getTime()
+            : valueA.getTime() - valueB.getTime();
+        } else if (activeSortField === 'age') {
+          return activeSortOrder === 'desc' ? valueB - valueA : valueA - valueB;
+        } else {
+          return activeSortOrder === 'desc' 
+            ? valueB.localeCompare(valueA)
+            : valueA.localeCompare(valueB);
+        }
+      });
+    }
+
     setFilteredStudents(filtered);
     // Reset pagination when filters change to avoid empty pages
     setEnrolledPage(1);
     setNotEnrolledPage(1);
-  }, [students, filters]);
+  }, [students, filters, sortStates]);
 
   const handleFilterChange = (field: string, value: string) => {
     setFilters(prev => ({
@@ -165,12 +310,123 @@ export const ManageStudents: React.FC = () => {
     }));
   };
 
+  const handleSortToggle = (field: keyof typeof sortStates) => {
+    setSortStates(prev => {
+      // Reset all other fields to null
+      const newState = {
+        createdAt: null,
+        age: null,
+        name: null,
+        surname: null
+      } as typeof prev;
+      
+      // Toggle the clicked field
+      if (prev[field] === null) {
+        newState[field] = 'desc';
+      } else if (prev[field] === 'desc') {
+        newState[field] = 'asc';
+      } else {
+        newState[field] = 'desc';
+      }
+      
+      return newState;
+    });
+  };
+
   const calculateAge = (birthDate: Date | undefined | null): string => {
     if (!birthDate) return 'N/A';
     const date = new Date(birthDate);
     if (!isValid(date)) return 'N/A';
     const age = new Date().getFullYear() - date.getFullYear();
     return age.toString();
+  };
+
+  // CSV Export function
+  const exportToCSV = () => {
+    try {
+      // Define CSV headers
+      const headers = [
+        'Nome',
+        'Cognome',
+        'Codice Fiscale',
+        'Data di Nascita',
+        'Genere',
+        'Telefono',
+        'Indirizzo',
+        'Città',
+        'CAP',
+        'Modalità di Frequenza',
+        'Tipo di Iscrizione',
+        'Classe Precedente',
+        'Classe Scuola Italiana',
+        'Ha Disabilità',
+        'Nome Genitore',
+        'Telefono Genitore',
+        'Email Genitore',
+        'Data Registrazione',
+        'Turni',
+        'Iscritto',
+        'Data Iscrizione',
+        'Stato Account'
+      ];
+
+      // Convert student data to CSV rows
+      const csvData = students.map(student => {
+        return [
+          student.firstName || '',
+          student.lastName || '',
+          student.codiceFiscale || '',
+          student.birthDate && isValid(new Date(student.birthDate)) ? format(new Date(student.birthDate), 'dd/MM/yyyy') : '',
+          student.gender || '',
+          student.phoneNumber || '',
+          student.address || '',
+          student.city || '',
+          student.postalCode || '',
+          student.attendanceMode || '',
+          student.enrollmentType || '',
+          student.previousYearClass || '',
+          student.italianSchoolClass || '',
+          student.hasDisability ? 'Sì' : 'No',
+          student.parentName || '',
+          student.parentContact || '',
+          student.parentEmail || '',
+          student.registrationDate && isValid(new Date(student.createdAt)) ? format(new Date(student.createdAt), 'dd/MM/yyyy HH:mm') : '',
+          student.selectedTurni ? student.selectedTurni.join(', ') : '',
+          student.isEnrolled ? 'Sì' : 'No',
+          student.enrollmentDate && isValid(new Date(student.enrollmentDate)) ? format(new Date(student.enrollmentDate), 'dd/MM/yyyy') : '',
+          student.accountStatus || ''
+        ];
+      });
+
+      // Create CSV content
+      const csvContent = [
+        headers.join(','),
+        ...csvData.map(row => 
+          row.map(field => 
+            // Escape commas and quotes in CSV fields
+            typeof field === 'string' && (field.includes(',') || field.includes('"')) 
+              ? `"${field.replace(/"/g, '""')}"` 
+              : field
+          ).join(',')
+        )
+      ].join('\n');
+
+      // Create and download file
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', `studenti_${format(new Date(), 'yyyy-MM-dd_HH-mm')}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setMessage({ type: 'success', text: 'File CSV scaricato con successo!' });
+    } catch (error) {
+      console.error('Error exporting CSV:', error);
+      setMessage({ type: 'error', text: 'Errore durante l\'esportazione del CSV' });
+    }
   };
 
   // Student Card Component
@@ -206,7 +462,7 @@ export const ManageStudents: React.FC = () => {
                   <span className="inline-flex items-center">
                     <Users className="h-3 w-3 mr-1" />
                     {(() => {
-                      const cls = classes.find(c => c.id === student.classId);
+                      const cls = classes.find(c => c.id === (student as any).currentClass);
                       return cls ? `${cls.name}` : 'Non assegnato';
                     })()}
                   </span>
@@ -234,16 +490,16 @@ export const ManageStudents: React.FC = () => {
                   disabled={processingStudent === student.id}
                   className={`w-6 h-6 rounded-full flex items-center justify-center transition-colors ${
                     student.isEnrolled 
-                      ? 'bg-green-100 text-green-700 hover:bg-green-200' 
-                      : 'bg-red-100 text-red-700 hover:bg-red-200'
+                      ?  'bg-red-100 text-red-700 hover:bg-red-200'
+                      : 'bg-green-100 text-green-700 hover:bg-green-200'
                   } ${processingStudent === student.id ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
                 >
                   {processingStudent === student.id ? (
                     <div className="animate-spin rounded-full h-3 w-3 border border-current border-t-transparent" />
                   ) : student.isEnrolled ? (
-                    <CheckCircle className="h-4 w-4" />
+                    <UserMinus className="h-4 w-4" />
                   ) : (
-                    <X className="h-4 w-4" />
+                    <UserPlus className="h-4 w-4" />
                   )}
                 </button>
                 
@@ -287,20 +543,36 @@ export const ManageStudents: React.FC = () => {
                       <h4 className="text-sm font-medium text-gray-700 mb-2">Informazioni Studente</h4>
                       <div className="space-y-2 text-sm">
                         <div className="flex justify-between">
-                          <span className="text-gray-500">Email:</span>
-                          <span className="text-gray-900">{student.email}</span>
-                        </div>
-                        <div className="flex justify-between">
                           <span className="text-gray-500">Data di nascita:</span>
                           <span className="text-gray-900">{formatDate(student.birthDate)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Codice Fiscale:</span>
+                          <span className="text-gray-900">{(student as any).codiceFiscale || 'N/A'}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-gray-500">Indirizzo:</span>
                           <span className="text-gray-900">{student.address || 'N/A'}</span>
                         </div>
                         <div className="flex justify-between">
+                          <span className="text-gray-500">Città:</span>
+                          <span className="text-gray-900">{(student as any).city || 'N/A'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">CAP:</span>
+                          <span className="text-gray-900">{(student as any).postalCode || 'N/A'}</span>
+                        </div>
+                        <div className="flex justify-between">
                           <span className="text-gray-500">Genere:</span>
-                          <span className="text-gray-900">{student.gender || 'N/A'}</span>
+                          <span className="text-gray-900">{student.gender === 'M' ? 'Maschio' : student.gender === 'F' ? 'Femmina' : 'N/A'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Modalità frequenza:</span>
+                          <span className="text-gray-900">{(student as any).attendanceMode === 'in_presenza' ? 'In presenza' : (student as any).attendanceMode === 'online' ? 'Online' : 'N/A'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Tipo iscrizione:</span>
+                          <span className="text-gray-900">{(student as any).enrollmentType === 'nuova_iscrizione' ? 'Nuova Iscrizione' : (student as any).enrollmentType === 'rinnovo' ? 'Rinnovo' : 'N/A'}</span>
                         </div>
                       </div>
                     </div>
@@ -316,8 +588,37 @@ export const ManageStudents: React.FC = () => {
                           <span className="text-gray-900">{student.parentContact || 'N/A'}</span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-gray-500">Emergenza:</span>
-                          <span className="text-gray-900">{student.emergencyContact || 'N/A'}</span>
+                          <span className="text-gray-500">Email genitore:</span>
+                          <span className="text-gray-900">{(student as any).parentEmail || 'N/A'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Classe italiana:</span>
+                          <span className="text-gray-900">{(student as any).italianSchoolClass || 'N/A'}</span>
+                        </div>
+                        {(student as any).selectedTurni && (student as any).selectedTurni.length > 0 && (
+                          <div className="flex justify-between">
+                            <span className="text-gray-500">Turni selezionati:</span>
+                            <span className="text-gray-900">
+                              {(student as any).selectedTurni.map((turno: string) => {
+                                switch(turno) {
+                                  case 'sabato_pomeriggio': return 'Sab. Pom.';
+                                  case 'sabato_sera': return 'Sab. Sera';
+                                  case 'domenica_mattina': return 'Dom. Matt.';
+                                  case 'domenica_pomeriggio': return 'Dom. Pom.';
+                                  default: return turno;
+                                }
+                              }).join(', ')}
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Fratelli/Sorelle:</span>
+                          <span className="text-gray-900">
+                            {(student as any).siblingCount > 1 
+                              ? `${(student as any).siblingCount - 1} ${(student as any).siblingCount - 1 === 1 ? 'fratello/sorella' : 'fratelli/sorelle'}`
+                              : 'Figlio unico'
+                            }
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -376,6 +677,8 @@ export const ManageStudents: React.FC = () => {
     setValue('email', student.email);
     setValue('phoneNumber', student.phoneNumber || '');
     setValue('address', student.address || '');
+    setValue('city', (student as any).city || '');
+    setValue('postalCode', (student as any).postalCode || '');
     
     if (student.birthDate && isValid(new Date(student.birthDate))) {
       setValue('birthDate', format(new Date(student.birthDate), 'yyyy-MM-dd'));
@@ -387,7 +690,15 @@ export const ManageStudents: React.FC = () => {
     setValue('emergencyContact', student.emergencyContact || '');
     setValue('parentName', student.parentName || '');
     setValue('parentContact', student.parentContact || '');
-    setValue('classId', student.classId || '');
+    setValue('parentEmail', (student as any).parentEmail || '');
+    setValue('classId', (student as any).currentClass || '');
+    setValue('italianSchoolClass', (student as any).italianSchoolClass || '');
+    setValue('codiceFiscale', (student as any).codiceFiscale || '');
+    setValue('enrollmentType', (student as any).enrollmentType || '');
+    setValue('hasDisability', (student as any).hasDisability || false);
+    setValue('selectedTurni', (student as any).selectedTurni || []);
+    setValue('attendanceMode', (student as any).attendanceMode || '');
+    setValue('accountStatus', (student as any).accountStatus || '');
   };
 
   const handleCancelEdit = () => {
@@ -428,12 +739,13 @@ export const ManageStudents: React.FC = () => {
 
   const openEnrollmentDialog = (student: UserType) => {
     const isCurrentlyEnrolled = !!student.isEnrolled;
-    if (isCurrentlyEnrolled && student.classId) {
-      const studentClass = classes.find(c => c.id === student.classId);
+    const studentCurrentClass = (student as any).currentClass;
+    if (isCurrentlyEnrolled && studentCurrentClass) {
+      const studentClass = classes.find(c => c.id === studentCurrentClass);
       setShowEnrollError({ open: true, name: student.displayName, className: studentClass?.name || 'una classe' });
       return;
     }
-    setEnrollTarget({ id: student.id, name: student.displayName, classId: student.classId, currentStatus: student.isEnrolled });
+    setEnrollTarget({ id: student.id, name: student.displayName, classId: studentCurrentClass, currentStatus: student.isEnrolled });
     setTargetEnrollStatus(!isCurrentlyEnrolled);
     setShowEnrollConfirm(true);
   };
@@ -446,10 +758,11 @@ export const ManageStudents: React.FC = () => {
     setProcessingStudent(studentId);
 
     try {
-      const studentRef = doc(db, 'users', studentId);
+      const studentRef = doc(db, 'students', studentId);
       await updateDoc(studentRef, {
         isEnrolled: newStatus,
-        enrollmentDate: newStatus ? new Date() : null
+        enrollmentDate: newStatus ? new Date() : null,
+        accountStatus: newStatus ? 'active' : 'pending_approval'
       });
 
       setStudents(prev => prev.map(student =>
@@ -488,9 +801,9 @@ export const ManageStudents: React.FC = () => {
     setMessage(null);
     
     try {
-      const studentRef = doc(db, 'users', editingStudent);
+      const studentRef = doc(db, 'students', editingStudent);
       const currentStudent = students.find(s => s.id === editingStudent);
-      const oldClassId = currentStudent?.classId;
+      const oldClassId = currentStudent?.currentClass;
       const newClassIdDb = data.classId ?? null; // value sent to Firestore (nullable)
       const newClassIdState = data.classId ?? undefined; // value kept in local state (undefined preferred over null)
       
@@ -498,14 +811,39 @@ export const ManageStudents: React.FC = () => {
         displayName: data.displayName,
         phoneNumber: data.phoneNumber || null,
         address: data.address || null,
+        city: data.city || null,
+        postalCode: data.postalCode || null,
         birthDate: data.birthDate ? new Date(data.birthDate) : null,
         gender: data.gender || null,
         emergencyContact: data.emergencyContact || null,
         parentName: data.parentName || null,
         parentContact: data.parentContact || null,
-        classId: newClassIdDb,
+        currentClass: newClassIdDb,
+        italianSchoolClass: data.italianSchoolClass || null,
+        codiceFiscale: data.codiceFiscale || null,
+        enrollmentType: data.enrollmentType || null,
+        hasDisability: data.hasDisability || false,
+        selectedTurni: data.selectedTurni || [],
+        attendanceMode: data.attendanceMode || null,
+        accountStatus: data.accountStatus || null,
         updatedAt: new Date()
       });
+
+      // Update parent information if provided
+      if (data.parentEmail) {
+        const parentId = currentStudent?.parentId;
+        if (parentId) {
+          const parentRef = doc(db, 'users', parentId);
+          const parentUpdates: Record<string, any> = {};
+          
+          if (data.parentEmail) parentUpdates.email = data.parentEmail;
+          
+          if (Object.keys(parentUpdates).length > 0) {
+            parentUpdates.updatedAt = new Date();
+            await updateDoc(parentRef, parentUpdates);
+          }
+        }
+      }
 
       // Update class student counts if class changed
       if (oldClassId !== newClassIdDb) {
@@ -521,11 +859,26 @@ export const ManageStudents: React.FC = () => {
         student.id === editingStudent
           ? {
               ...student,
-              ...data,
-              gender: data.gender === 'male' || data.gender === 'female' ? data.gender : undefined,
-              classId: newClassIdState,
-              birthDate: data.birthDate ? new Date(data.birthDate) : undefined
-            }
+              displayName: data.displayName,
+              phoneNumber: data.phoneNumber || undefined,
+              address: data.address || undefined,
+              city: data.city || undefined,
+              postalCode: data.postalCode || undefined,
+              gender: data.gender === 'M' ? 'M' : data.gender === 'F' ? 'F' : student.gender,
+              emergencyContact: data.emergencyContact || undefined,
+              parentName: data.parentName || undefined,
+              parentContact: data.parentContact || undefined,
+              parentEmail: data.parentEmail || undefined,
+              currentClass: newClassIdState || student.currentClass,
+              italianSchoolClass: data.italianSchoolClass || undefined,
+              codiceFiscale: data.codiceFiscale || undefined,
+              enrollmentType: data.enrollmentType || undefined,
+              hasDisability: data.hasDisability || false,
+              selectedTurni: data.selectedTurni || [],
+              attendanceMode: data.attendanceMode || undefined,
+              accountStatus: data.accountStatus || undefined,
+              birthDate: data.birthDate ? new Date(data.birthDate) : student.birthDate
+            } as StudentWithParent
           : student
       ));
 
@@ -693,35 +1046,22 @@ export const ManageStudents: React.FC = () => {
               </CardTitle>
             </CardHeader>
             <form onSubmit={handleSubmit(onSubmit)}>
-              <CardContent className="p-6 space-y-6">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <CardContent className="p-6 space-y-8">
+                {/* Informazioni Personali */}
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-2">Informazioni Personali</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <Input
                       label="Nome completo"
                       error={errors.displayName?.message}
                       className="anime-input"
                       {...register('displayName', { required: 'Il nome è obbligatorio' })}
                     />
-                    
-                    <Input
-                      label="Email"
-                      type="email"
-                      disabled
-                      className="anime-input bg-gray-50"
-                      {...register('email')}
-                    />
 
                     <Input
-                      label="Telefono"
-                      leftIcon={<Phone className="h-5 w-5 text-gray-400" />}
+                      label="Codice Fiscale"
                       className="anime-input"
-                      {...register('phoneNumber')}
-                    />
-
-                    <Input
-                      label="Indirizzo"
-                      leftIcon={<MapPin className="h-5 w-5 text-gray-400" />}
-                      className="anime-input"
-                      {...register('address')}
+                      {...register('codiceFiscale')}
                     />
 
                     <Input
@@ -741,17 +1081,51 @@ export const ManageStudents: React.FC = () => {
                         {...register('gender')}
                       >
                         <option value="">Seleziona genere</option>
-                        <option value="male">Maschio</option>
-                        <option value="female">Femmina</option>
+                        <option value="M">Maschio</option>
+                        <option value="F">Femmina</option>
                       </select>
                     </div>
 
                     <Input
-                      label="Contatto di emergenza"
+                      label="Telefono"
+                      leftIcon={<Phone className="h-5 w-5 text-gray-400" />}
                       className="anime-input"
-                      {...register('emergencyContact')}
+                      {...register('phoneNumber')}
+                    />
+                  </div>
+                </div>
+
+                {/* Indirizzo */}
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-2">Indirizzo</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <Input
+                      label="Indirizzo"
+                      leftIcon={<MapPin className="h-5 w-5 text-gray-400" />}
+                      className="anime-input md:col-span-2"
+                      {...register('address')}
                     />
 
+                    <Input
+                      label="Città"
+                      leftIcon={<MapPin className="h-5 w-5 text-gray-400" />}
+                      className="anime-input md:col-span-2"
+                      {...register('city')}
+                    />
+
+                    <Input
+                      label="CAP"
+                      leftIcon={<MapPin className="h-5 w-5 text-gray-400" />}
+                      className="anime-input"
+                      {...register('postalCode')}
+                    />
+                  </div>
+                </div>
+
+                {/* Informazioni Genitore */}
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-2">Informazioni Genitore</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <Input
                       label="Nome del genitore"
                       className="anime-input"
@@ -760,13 +1134,34 @@ export const ManageStudents: React.FC = () => {
 
                     <Input
                       label="Contatto del genitore"
+                      leftIcon={<Phone className="h-5 w-5 text-gray-400" />}
                       className="anime-input"
                       {...register('parentContact')}
                     />
 
+                    <Input
+                      label="Email del genitore"
+                      type="email"
+                      leftIcon={<Mail className="h-5 w-5 text-gray-400" />}
+                      className="anime-input md:col-span-2"
+                      {...register('parentEmail')}
+                    />
+                  </div>
+                </div>
+
+                {/* Informazioni Scolastiche */}
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-2">Informazioni Scolastiche</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <Input
+                      label="Classe Scuola Italiana"
+                      className="anime-input"
+                      {...register('italianSchoolClass')}
+                    />
+
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Classe
+                        Classe Assegnata
                       </label>
                       <select
                         className="block w-full rounded-xl border border-gray-200 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm bg-white py-3 px-4 transition-colors"
@@ -780,7 +1175,63 @@ export const ManageStudents: React.FC = () => {
                         ))}
                       </select>
                     </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Tipo Iscrizione
+                      </label>
+                      <select
+                        className="block w-full rounded-xl border border-gray-200 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm bg-white py-3 px-4 transition-colors"
+                        {...register('enrollmentType')}
+                      >
+                        <option value="">Seleziona tipo</option>
+                        <option value="nuova_iscrizione">Nuova Iscrizione</option>
+                        <option value="rinnovo">Rinnovo</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Modalità Frequenza
+                      </label>
+                      <select
+                        className="block w-full rounded-xl border border-gray-200 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm bg-white py-3 px-4 transition-colors"
+                        {...register('attendanceMode')}
+                      >
+                        <option value="">Seleziona modalità</option>
+                        <option value="in_presenza">In Presenza</option>
+                        <option value="online">Online</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Stato Account
+                      </label>
+                      <select
+                        className="block w-full rounded-xl border border-gray-200 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm bg-white py-3 px-4 transition-colors"
+                        {...register('accountStatus')}
+                      >
+                        <option value="">Seleziona stato</option>
+                        <option value="pending_approval">In Attesa di Approvazione</option>
+                        <option value="active">Attivo</option>
+                        <option value="suspended">Sospeso</option>
+                        <option value="inactive">Inattivo</option>
+                      </select>
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="flex items-center space-x-2">
+                        <input
+                          type="checkbox"
+                          className="rounded border-gray-300 text-blue-600 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                          {...register('hasDisability')}
+                        />
+                        <span className="text-sm font-medium text-gray-700">Ha disabilità</span>
+                      </label>
+                    </div>
                   </div>
+                </div>
                 </CardContent>
                 <CardFooter className="flex justify-end space-x-4 bg-gray-50 border-t border-gray-200 p-6">
                   <Button
@@ -822,6 +1273,14 @@ export const ManageStudents: React.FC = () => {
                   </CardTitle>
                   <div className="flex items-center gap-2">
                     <Button
+                      onClick={exportToCSV}
+                      className="bg-green-600 hover:bg-green-700 text-white rounded-xl"
+                      size="sm"
+                      leftIcon={<Download className="h-4 w-4" />}
+                    >
+                      Esporta CSV
+                    </Button>
+                    <Button
                       variant="ghost"
                       size="sm"
                       onClick={() => setFiltersOpen(o => !o)}
@@ -829,17 +1288,22 @@ export const ManageStudents: React.FC = () => {
                       aria-expanded={filtersOpen}
                       aria-controls="students-filters"
                     >
-                      <svg className={`h-4 w-4 transition-transform ${filtersOpen ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" clipRule="evenodd"/></svg>
+                      <Filter className="h-4 w-4" />
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => setFilters({
                         name: '',
+                        surname: '',
                         class: '',
                         age: '',
                         parentName: '',
-                        parentPhone: ''
+                        parentPhone: '',
+                        enrollmentType: '',
+                        attendanceMode: '',
+                        gender: '',
+                        italianSchoolClass: ''
                       })}
                       className="hidden sm:inline-flex text-gray-600 hover:text-gray-800 rounded-xl"
                     >
@@ -852,11 +1316,11 @@ export const ManageStudents: React.FC = () => {
               <CardContent className="p-6">
                 <div id="students-filters" className={`space-y-4 ${filtersOpen ? 'block' : 'hidden'} sm:block`}>
                   {/* Primary Filters Row */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-700 flex items-center">
                         <Search className="h-4 w-4 mr-1 text-gray-500" />
-                        Nome Studente
+                        Nome
                       </label>
                       <Input
                         type="text"
@@ -866,15 +1330,29 @@ export const ManageStudents: React.FC = () => {
                         className="w-full rounded-xl border-gray-200 focus:border-blue-400 focus:ring-blue-400/20"
                       />
                     </div>
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-700 flex items-center">
+                        <Search className="h-4 w-4 mr-1 text-gray-500" />
+                        Cognome
+                      </label>
+                      <Input
+                        type="text"
+                        placeholder="Cerca per cognome..."
+                        value={filters.surname}
+                        onChange={(e) => handleFilterChange('surname', e.target.value)}
+                        className="w-full rounded-xl border-gray-200 focus:border-blue-400 focus:ring-blue-400/20"
+                      />
+                    </div>
                     
-                    <div className="space-y-2 hidden md:block">
+                    <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-700 flex items-center">
                         <Calendar className="h-4 w-4 mr-1 text-gray-500" />
                         Età
                       </label>
                       <Input
                         type="number"
-                        placeholder="Età studente..."
+                        placeholder="Età..."
                         value={filters.age}
                         onChange={(e) => handleFilterChange('age', e.target.value)}
                         className="w-full rounded-xl border-gray-200 focus:border-blue-400 focus:ring-blue-400/20"
@@ -902,7 +1380,7 @@ export const ManageStudents: React.FC = () => {
                   </div>
 
                   {/* Secondary Filters Row */}
-                  <div className="hidden md:grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-700 flex items-center">
                         <Users className="h-4 w-4 mr-1 text-gray-500" />
@@ -930,10 +1408,71 @@ export const ManageStudents: React.FC = () => {
                         className="w-full rounded-xl border-gray-200 focus:border-blue-400 focus:ring-blue-400/20"
                       />
                     </div>
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-700">
+                        Genere
+                      </label>
+                      <select
+                        value={filters.gender}
+                        onChange={(e) => handleFilterChange('gender', e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-400/20 focus:border-blue-400 bg-white"
+                      >
+                        <option value="">Tutti i generi</option>
+                        <option value="M">Maschio</option>
+                        <option value="F">Femmina</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Tertiary Filters Row */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-700">
+                        Tipo Iscrizione
+                      </label>
+                      <select
+                        value={filters.enrollmentType}
+                        onChange={(e) => handleFilterChange('enrollmentType', e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-400/20 focus:border-blue-400 bg-white"
+                      >
+                        <option value="">Tutti i tipi</option>
+                        <option value="nuova_iscrizione">Nuova Iscrizione</option>
+                        <option value="rinnovo">Rinnovo</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-700">
+                        Modalità Frequenza
+                      </label>
+                      <select
+                        value={filters.attendanceMode}
+                        onChange={(e) => handleFilterChange('attendanceMode', e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-400/20 focus:border-blue-400 bg-white"
+                      >
+                        <option value="">Tutte le modalità</option>
+                        <option value="in_presenza">In Presenza</option>
+                        <option value="online">Online</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-700">
+                        Classe Italiana
+                      </label>
+                      <Input
+                        type="text"
+                        placeholder="Es. 1A, 2B..."
+                        value={filters.italianSchoolClass}
+                        onChange={(e) => handleFilterChange('italianSchoolClass', e.target.value)}
+                        className="w-full rounded-xl border-gray-200 focus:border-blue-400 focus:ring-blue-400/20"
+                      />
+                    </div>
                   </div>
 
                   {/* Filter Summary */}
-                  {(filters.name || filters.class || filters.age || filters.parentName || filters.parentPhone) && (
+                  {(filters.name || filters.surname || filters.class || filters.age || filters.parentName || filters.parentPhone || filters.enrollmentType || filters.attendanceMode || filters.gender || filters.italianSchoolClass) && (
                     <div className="hidden md:block mt-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center text-sm text-blue-700">
@@ -954,6 +1493,17 @@ export const ManageStudents: React.FC = () => {
                               <button
                                 onClick={() => handleFilterChange('name', '')}
                                 className="ml-1 hover:text-blue-900"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          )}
+                          {filters.surname && (
+                            <span className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700">
+                              Cognome: {filters.surname}
+                              <button
+                                onClick={() => handleFilterChange('surname', '')}
+                                className="ml-1 hover:text-indigo-900"
                               >
                                 <X className="h-3 w-3" />
                               </button>
@@ -1003,6 +1553,50 @@ export const ManageStudents: React.FC = () => {
                               </button>
                             </span>
                           )}
+                          {filters.enrollmentType && (
+                            <span className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-teal-100 text-teal-700">
+                              Tipo: {filters.enrollmentType === 'nuova_iscrizione' ? 'Nuova Iscrizione' : 'Rinnovo'}
+                              <button
+                                onClick={() => handleFilterChange('enrollmentType', '')}
+                                className="ml-1 hover:text-teal-900"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          )}
+                          {filters.attendanceMode && (
+                            <span className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-cyan-100 text-cyan-700">
+                              Modalità: {filters.attendanceMode === 'in_presenza' ? 'In Presenza' : 'Online'}
+                              <button
+                                onClick={() => handleFilterChange('attendanceMode', '')}
+                                className="ml-1 hover:text-cyan-900"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          )}
+                          {filters.gender && (
+                            <span className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-rose-100 text-rose-700">
+                              Genere: {filters.gender === 'M' ? 'Maschio' : 'Femmina'}
+                              <button
+                                onClick={() => handleFilterChange('gender', '')}
+                                className="ml-1 hover:text-rose-900"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          )}
+                          {filters.italianSchoolClass && (
+                            <span className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-amber-100 text-amber-700">
+                              Classe IT: {filters.italianSchoolClass}
+                              <button
+                                onClick={() => handleFilterChange('italianSchoolClass', '')}
+                                className="ml-1 hover:text-amber-900"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1018,6 +1612,104 @@ export const ManageStudents: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-6">
+              {/* Sorting Bar */}
+              <Card className="bg-white/90 backdrop-blur-md border border-white/30 shadow-lg rounded-2xl overflow-hidden mb-4 mt-4">
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <div className="p-2 bg-gray-100 rounded-lg">
+                        <ArrowUp className="h-4 w-4 text-purple-600" />
+                      </div>
+                      <div>
+                    <h3 className="text-sm font-semibold text-gray-800">Ordinamento</h3>
+                    <p className="text-xs text-gray-600">Clicca per ordinare</p>
+                  </div>
+                </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        onClick={() => handleSortToggle('createdAt')}
+                        variant={sortStates.createdAt ? 'primary' : 'outline'}
+                        size="sm"
+                        className={`rounded-xl transition-all ${
+                          sortStates.createdAt 
+                            ? 'bg-blue-600 text-white shadow-md' 
+                            : 'text-gray-600 hover:text-gray-800 border-gray-200'
+                        }`}
+                        leftIcon={
+                          sortStates.createdAt === 'desc' ? (
+                            <ArrowDown className="h-3 w-3" />
+                          ) : sortStates.createdAt === 'asc' ? (
+                            <ArrowUp className="h-3 w-3" />
+                          ) : null
+                        }
+                      >
+                        Data Registrazione
+                      </Button>
+                      
+                      <Button
+                        onClick={() => handleSortToggle('age')}
+                        variant={sortStates.age ? 'primary' : 'outline'}
+                        size="sm"
+                        className={`rounded-xl transition-all ${
+                          sortStates.age 
+                            ? 'bg-green-600 text-white shadow-md' 
+                            : 'text-gray-600 hover:text-gray-800 border-gray-200'
+                        }`}
+                        leftIcon={
+                          sortStates.age === 'desc' ? (
+                            <ArrowDown className="h-3 w-3" />
+                          ) : sortStates.age === 'asc' ? (
+                            <ArrowUp className="h-3 w-3" />
+                          ) : null
+                        }
+                      >
+                        Età
+                      </Button>
+                      
+                      <Button
+                        onClick={() => handleSortToggle('name')}
+                        variant={sortStates.name ? 'primary' : 'outline'}
+                        size="sm"
+                        className={`rounded-xl transition-all ${
+                          sortStates.name 
+                            ? 'bg-purple-600 text-white shadow-md' 
+                            : 'text-gray-600 hover:text-gray-800 border-gray-200'
+                        }`}
+                        leftIcon={
+                          sortStates.name === 'desc' ? (
+                            <ArrowDown className="h-3 w-3" />
+                          ) : sortStates.name === 'asc' ? (
+                            <ArrowUp className="h-3 w-3" />
+                          ) : null
+                        }
+                      >
+                        Nome
+                      </Button>
+                      
+                      <Button
+                        onClick={() => handleSortToggle('surname')}
+                        variant={sortStates.surname ? 'primary' : 'outline'}
+                        size="sm"
+                        className={`rounded-xl transition-all ${
+                          sortStates.surname 
+                            ? 'bg-orange-600 text-white shadow-md' 
+                            : 'text-gray-600 hover:text-gray-800 border-gray-200'
+                        }`}
+                        leftIcon={
+                          sortStates.surname === 'desc' ? (
+                            <ArrowDown className="h-3 w-3" />
+                          ) : sortStates.surname === 'asc' ? (
+                            <ArrowUp className="h-3 w-3" />
+                          ) : null
+                        }
+                      >
+                        Cognome
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
               {/* Section Header */}
               <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-2xl p-6 border border-blue-100">
                 {/* Quick Stats */}
